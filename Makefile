@@ -11,4 +11,4 @@ job.o : src/job.c src/job.h
 	cc -c src/job.c
 
 clean :
-	rm bg_shell main.o
+	rm bg_shell main.o job.o str.o
