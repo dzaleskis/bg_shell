@@ -10,96 +10,189 @@
 #define ARGS_LENGTH 20
 #define MAX_BG_JOBS 10
 
+enum job_status{
+    NOT_FOUND = 0,
+    STOPPED = 1,
+    EXITED = 2,
+    SIGNALED = 3,
+    CONTINUED = 4,
+    RUNNING = 5,
+    NO_CHANGE = 6
+};
+typedef enum job_status job_status;
+
+struct job{
+    job_status status;
+    pid_t pid;
+    pid_t pgid;
+};
+typedef struct job job;
+
 // global vars are zero-initialized by default
-static pid_t current_fg_pid;
-static pid_t bg_pids[MAX_BG_JOBS];
-static int bg_pid_count;
+const job empty_job;
+static job fg_job;
+static job bg_jobs[MAX_BG_JOBS];
+static int bg_job_count;
 
-static void add_bg_pid(pid_t bg_pid){
-    if(bg_pid_count == MAX_BG_JOBS){
-        fputs("error: maximum number of background jobs reached.\n", stderr);
-        // TODO: call cleanup here
-        exit(EXIT_FAILURE);
-    }
+
+static void cleanup(){
     for(int i = 0; i < MAX_BG_JOBS; i++){
-        if(bg_pids[i] == 0){
-            bg_pids[i] = bg_pid;
-            break;
+        if(bg_jobs[i].pid > 0){
+            kill(bg_jobs[i].pid, SIGTERM);
         }
     }
-    bg_pid_count++;
-}
-
-static void remove_bg_pid(pid_t bg_pid){
-    for(int i = 0; i < MAX_BG_JOBS; i++){
-        if(bg_pids[i] == bg_pid){
-            bg_pids[i] = 0;
-            bg_pid_count--;
-            break;
-        }
-    }
-}
-
-static void report_status(pid_t bg_pid){
+    
+    sleep(1);
     int status;
-    int wait_result = waitpid(bg_pid, &status, WNOHANG);
-
-    printf("id: %i | status: ", bg_pid);
-
-    if(wait_result == -1){
-        printf("unknown error\n");
-    }
-    else if(wait_result == 0){
-        printf("running\n");
-    }
-    else if (WIFEXITED(status)) {
-        printf("exited, status=%d\n", WEXITSTATUS(status));
-    }
-    else if (WIFSIGNALED(status)) {
-        printf("killed by signal %d\n", WTERMSIG(status));
-    }
-    else if (WIFSTOPPED(status)) {
-        printf("stopped by signal %d\n", WSTOPSIG(status));
-    }
-    else if (WIFCONTINUED(status)) {
-        printf("continued\n");
-    }
-}
-
-static void print_bg_jobs(){
+    
     for(int i = 0; i < MAX_BG_JOBS; i++){
-        if(bg_pids[i] > 0 ){
-            report_status(bg_pids[i]);
+        if(bg_jobs[i].pid > 0){
+            kill(bg_jobs[i].pid, SIGTERM);
         }
-    }
-}
-
-static void sigchld_handler(int signo) {
-    printf("signal %i caught in sigchld handler\n", signo);
-    // some child has terminated, determine which and clear it from background job table
-    pid_t child_pid;
-    int status;
-    // WNOHANG doesn't block, but doesn't catch stopped processes
-    while ((child_pid = waitpid(-1, &status, WNOHANG)) > 0)
-    {
-        remove_bg_pid(child_pid);
-    }
-}
-
-static void sigstp_handler(int signo) {
-    printf("signal %i caught in sigstp handler\n", signo);
-    // if a process is currently running in the foreground, stop it and add to background
-    if(current_fg_pid > 0){
-        kill(current_fg_pid, SIGTSTP);
-        printf("[%i]: stopped\n", current_fg_pid);
-        add_bg_pid(current_fg_pid);
-        current_fg_pid = 0;
     }
 }
 
 void err_exit(const char* msg){
     perror(msg);
-    exit(1);
+    cleanup();
+    exit(EXIT_FAILURE);
+}
+
+void clean_exit(){
+    cleanup();
+    exit(0);
+}
+
+static void add_bg_job(job bg_job){
+    if(bg_job_count == MAX_BG_JOBS){
+        err_exit("maximum background job count reached");
+    }
+    for(int i = 0; i < MAX_BG_JOBS; i++){
+        if(bg_jobs[i].pid == 0){
+            bg_jobs[i] = bg_job;
+            bg_job_count++;
+            return;
+        }
+    }
+}
+
+static void remove_bg_job(pid_t bg_pid){
+    for(int i = 0; i < MAX_BG_JOBS; i++){
+        if(bg_jobs[i].pid == bg_pid){
+            bg_jobs[i] = empty_job;
+            bg_job_count--;
+            break;
+        }
+    }
+}
+
+static job get_bg_job(pid_t bg_pid){
+    for(int i = 0; i < MAX_BG_JOBS; i++){
+        if(bg_jobs[i].pid == bg_pid){
+            return bg_jobs[i];
+        }
+    }
+    return empty_job;
+}
+
+
+static job_status get_status(pid_t job_pid, int flags){
+    int status;
+    int wait_result = waitpid(job_pid, &status, flags);
+
+    if((flags && WNOHANG) && wait_result == 0){
+        return NO_CHANGE;
+    }
+    else if (WIFEXITED(status)) {
+        return EXITED;
+    }
+    else if ((flags && WUNTRACED) && WIFSTOPPED(status)) {
+        return STOPPED;
+    }
+    else if (WIFSIGNALED(status)) {
+        return SIGNALED;
+    }
+    else if ((flags && WCONTINUED) && WIFCONTINUED(status)) {
+        return CONTINUED;
+    }
+    else{
+        return NOT_FOUND;
+    }
+}
+
+static void print_job(job to_print){
+    printf("[%i]: ", to_print.pid);
+    switch (to_print.status){
+    case RUNNING:
+        printf("Running \n");
+        break;
+    case STOPPED:
+        printf("Stopped \n");
+        break;
+    case CONTINUED:
+        printf("Continued \n");
+        break;
+    case EXITED:
+        printf("Exited \n");
+        break;
+    case SIGNALED:
+        printf("Terminated by signal \n");
+        break;
+    default:
+        printf("Error: couldn't determine status \n");
+        break;
+    }
+}
+
+static void update_bg_jobs(){
+    for(int i = 0; i < MAX_BG_JOBS; i++){
+        if(bg_jobs[i].pid != 0){
+            job_status status = get_status(bg_jobs[i].pid, WNOHANG | WUNTRACED | WCONTINUED);
+            if(status != NO_CHANGE){
+                bg_jobs[i].status = status;
+            }
+        }
+    }
+}
+
+static void report_bg_jobs(){
+    for(int i = 0; i < MAX_BG_JOBS; i++){
+        if(bg_jobs[i].pid != 0){
+            print_job(bg_jobs[i]);
+            if(bg_jobs[i].status == SIGNALED || bg_jobs[i].status == EXITED || bg_jobs[i].status == NOT_FOUND){
+                remove_bg_job(bg_jobs[i].pid);
+            }
+        }
+    }
+}
+
+static void sigchld_handler(int signo) {
+    // some child has changed status, determine which
+    // if it was foreground process, update its status
+    job_status fg_job_status;
+    if(fg_job.pid != 0 && (fg_job_status = get_status(fg_job.pid, WNOHANG | WUNTRACED)) != RUNNING){
+        fg_job.status = fg_job_status;
+        if(fg_job_status == STOPPED){
+            print_job(fg_job);
+            add_bg_job(fg_job);
+            fg_job = empty_job;
+        }
+    }
+    else{
+        // if it was a background process, wait on it & update its status
+        update_bg_jobs();
+    }
+}
+
+static void sigtstp_handler(int signo) {
+    // if a process is currently running in the foreground, stop it and add to background
+    if(fg_job.pid != 0){
+        kill(fg_job.pid, SIGSTOP);
+    }
+}
+
+static void sigterm_handler(int signo) {
+    cleanup();
 }
 
 void split(char* str, const char* delim, char** output, int* output_size){
@@ -117,22 +210,28 @@ void split(char* str, const char* delim, char** output, int* output_size){
     (*output_size) = i + 1;
 }
 
+void setup_handler(int signo, sig_t handler){
+    if (signal(signo, handler) == SIG_ERR) {
+        err_exit("error setting signal handler\n");
+    }
+}
+
+int print_shell(){
+    printf("@bg_shell$ ");
+    return 1;
+}
+
 int main(int argc, char *argv[]){
 
-    if (signal(SIGTSTP, sigstp_handler) == SIG_ERR) {
-        fputs("An error occurred while setting a signal handler.\n", stderr);
-        return EXIT_FAILURE;
-    }
-    if (signal(SIGCHLD, sigchld_handler) == SIG_ERR) {
-        fputs("An error occurred while setting a signal handler.\n", stderr);
-        return EXIT_FAILURE;
-    }
+    setup_handler(SIGTSTP, sigtstp_handler);
+    setup_handler(SIGCHLD, sigchld_handler);
+    setup_handler(SIGTERM, sigterm_handler);
 
     char* line = NULL;
     size_t buflen = 0;
     ssize_t len = 0;
 
-    while ((len = getline(&line, &buflen, stdin)) > 0) {
+    while(print_shell() && (len = getline(&line, &buflen, stdin)) > 0) {
         if(line[len-1] == '\n'){
             if(len == 1){
                 continue;
@@ -148,16 +247,60 @@ int main(int argc, char *argv[]){
         split(line, " ", tokens, &token_count);
 
         char* command = tokens[0];
-
-        // process builtin commands here, not just exit
+        // process builtin commands here
         if(strcmp(command, "exit") == 0){
-            exit(0);
+            clean_exit();
         }
         if(strcmp(command, "jobs") == 0){
-            print_bg_jobs();
+            report_bg_jobs();
+            continue;
         }
-        else{
-            printf("%i", strcmp(command, "jobs"));
+        if(strcmp(command, "fg") == 0){
+            if(token_count == 2){
+                int parsed_pid = atoi(tokens[1]);
+                job bg_job = get_bg_job(parsed_pid);
+                if(bg_job.pid == 0){
+                    printf("job with given pid not found\n");
+                    continue;
+                }
+                if(bg_job.status != STOPPED){
+                    printf("job can't be continued\n");
+                    continue;
+                }
+                kill(bg_job.pid, SIGCONT);
+                remove_bg_job(bg_job.pid);
+                job new_fg_job = {RUNNING, bg_job.pid, 0};
+                fg_job = new_fg_job;
+                while(fg_job.status == RUNNING){
+                    sleep(1);
+                }
+                continue;
+            }
+            else{
+                printf("format: fg {pid}\n");
+            }
+            continue;
+        }
+        if(strcmp(command, "bg") == 0){
+            if(token_count == 2){
+                int parsed_pid = atoi(tokens[1]);
+                job bg_job = get_bg_job(parsed_pid);
+                if(bg_job.pid == 0){
+                    printf("job with given pid not found\n");
+                    continue;
+                }
+                if(bg_job.status != STOPPED){
+                    printf("job can't be continued\n");
+                    continue;
+                }
+                kill(bg_job.pid, SIGCONT);
+                setpgid(bg_job.pid, bg_job.pid);
+                continue;
+            }
+            else{
+                printf("format: bg {pid}\n");
+            }
+            continue;
         }
 
         int run_bg = 0;
@@ -172,9 +315,6 @@ int main(int argc, char *argv[]){
         pid_t child_pid = fork();
         if(child_pid == 0){
             // child process
-            // if(run_bg){
-            //     setpgid(0, 0);
-            // }
             if(execvp(args[0], args) < 0){
                 if(errno == 2){
                     printf("command not found\n");
@@ -182,26 +322,24 @@ int main(int argc, char *argv[]){
                 else{
                     printf("error executing process, code: %i\n", errno);
                 }
+                cleanup();
                 exit(EXIT_FAILURE);
             }
         }
         else{
             // main process
             if(run_bg){
-                printf("%i \n", child_pid);
+                // detach background process from the shell process group
+                setpgid(child_pid, child_pid);
+                job bg_job = {RUNNING, child_pid, child_pid};
+                add_bg_job(bg_job);
             }
             else{
-                int status;
-                pid_t wait_result;
-                current_fg_pid = child_pid;
-                // on success, returns the process ID of the child whose state has changed
-                // wuntraced also returns if child has stopped
-                wait_result = waitpid(child_pid, &status, WUNTRACED);
-                if (wait_result == -1) {
-                    // error!
-                    printf("error waiting on process %i. code: %i \n", child_pid, errno);
+                job new_fg_job = {RUNNING, child_pid, 0};
+                fg_job = new_fg_job;
+                while(fg_job.status == RUNNING){
+                    sleep(1);
                 }
-                current_fg_pid = 0;
             }
         }
     }
