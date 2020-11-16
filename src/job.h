@@ -1,9 +1,7 @@
-
+#include <sys/types.h>
 
 #ifndef JOBH
 #define JOBH
-
-#define MAX_BG_JOBS 10
 
 enum job_status{
     NOT_FOUND = 0,
@@ -19,30 +17,10 @@ typedef enum job_status job_status;
 struct job{
     job_status status;
     pid_t pid;
-    pid_t pgid;
 };
 typedef struct job job;
 
-const job empty_job;
-static job fg_job;
-static job bg_jobs[MAX_BG_JOBS];
-static int bg_job_count;
-
-static void cleanup(){
-    for(int i = 0; i < MAX_BG_JOBS; i++){
-        if(bg_jobs[i].pid > 0){
-            kill(bg_jobs[i].pid, SIGTERM);
-        }
-    }
-    
-    sleep(1);
-    int status;
-    
-    for(int i = 0; i < MAX_BG_JOBS; i++){
-        if(bg_jobs[i].pid > 0){
-            kill(bg_jobs[i].pid, SIGTERM);
-        }
-    }
-}
+job_status get_status(pid_t job_pid, int flags);
+void print_job(job to_print);
 
 #endif
